@@ -230,24 +230,35 @@ if "df" in st.session_state:
                     
                     data_clean = df[selected_features + [target_column, date_column]].copy()
                     
-                    sample_val = str(data_clean[date_column].dropna().iloc[0])
-                    if len(sample_val) in [5, 6] and sample_val.isdigit():
-                        def parse_roc_ym(val):
-                            v_str = str(val).zfill(5)
-                            roc_y = int(v_str[:-2])
-                            m = int(v_str[-2:])
-                            ad_y = roc_y + 1911
-                            return pd.to_datetime(f"{ad_y}-{m:02d}-01", errors='coerce')
-                        data_clean["_ParsedDate"] = data_clean[date_column].apply(parse_roc_ym)
-                    else:
-                        data_clean["_ParsedDate"] = pd.to_datetime(data_clean[date_column], errors='coerce')
+                    if data_clean[date_column].dropna().empty:
+                        train_status.empty()
+                        st.error("❌ 錯誤：所選的日期欄位無有效資料，請重新選擇正確的日期/時間欄位！")
+                        st.stop()
+
+                    try:
+                        # 直接用萬能的 pd.to_datetime 進行盲測解析
+                        parsed = pd.to_datetime(data_clean[date_column], errors='coerce')
+                        
+                        # 檢查有效日期的比例（例如必須要有一定比例成功轉換，才承認它是日期欄位）
+                        valid_count = parsed.notna().sum()
+                        total_count = len(data_clean)
+                        
+                        if valid_count / total_count < 0.5:  # 若有效轉換率低於 50%，視為無效
+                            data_clean["_ParsedDate"] = pd.Series(pd.NaT, index=data_clean.index)
+                        else:
+                            # 限制合理年份範圍（避免奇怪的純數字或極端年份被誤判）
+                            years = parsed.dt.year
+                            parsed = parsed.where((years >= 1900) & (years <= 2100), pd.NaT)
+                            data_clean["_ParsedDate"] = parsed
+                    except Exception as e:
+                        data_clean["_ParsedDate"] = pd.Series(pd.NaT, index=data_clean.index)
                     
                     data_clean = data_clean.dropna(subset=[target_column, "_ParsedDate"])
                     
                     if len(data_clean) == 0:
-                        train_progress.empty()
                         train_status.empty()
-                        st.error("❌ 錯誤：日期欄位解析失敗！請確認該欄位是否為正確的日期或 YYYMM 格式。")
+                        st.error("❌ 錯誤：日期欄位解析失敗！您可能選到了「非日期」的純代號或流水號欄位。請重新選擇正確的日期欄位後再試一次。")
+                        st.stop()
                     else:
                         if len(data_clean) > 20000:
                             data_clean = data_clean.sample(n=20000, random_state=42)
@@ -308,7 +319,7 @@ if "df" in st.session_state:
 # ==================== 步驟三：模型影響力與特徵重要程度解析 ====================
 if "trained_models" in st.session_state:
     st.markdown("---")
-    st.markdown("### 📊 關鍵影響因素分析 (變數重要程度排行榜)")
+    st.markdown("### 📊步驟三 關鍵影響因素分析 (變數重要程度排行榜)")
     
     with st.container(border=True):
         st.info("💡 **白話文解讀**：以下長條圖呈現各特徵變數對預測目標的整體影響力大小。")
@@ -500,17 +511,25 @@ if "trained_models" in st.session_state:
                 
                 df_orig["_IsWeekend"] = df_orig["_TempDate"].dt.weekday >= 5
                 
-                weekday_profile = df_orig[~df_orig["_IsWeekend"]][features].iloc[0].to_dict()
-                weekend_profile = df_orig[df_orig["_IsWeekend"]][features].iloc[0].to_dict()
+                weekday_df = df_orig[~df_orig["_IsWeekend"]]
+                weekend_df = df_orig[df_orig["_IsWeekend"]]
+                
+                weekday_profile = {}
+                weekend_profile = {}
                 
                 for feature in features:
                     if pd.api.types.is_numeric_dtype(df_orig[feature]):
-                        weekday_profile[feature] = df_orig[~df_orig["_IsWeekend"]][feature].mean()
-                        weekend_profile[feature] = df_orig[df_orig["_IsWeekend"]][feature].mean()
+                        weekday_profile[feature] = weekday_df[feature].mean() if not weekday_df.empty else df_orig[feature].mean()
+                        weekend_profile[feature] = weekend_df[feature].mean() if not weekend_df.empty else df_orig[feature].mean()
                     else:
                         unique_vals = df_orig[feature].dropna().unique().tolist()
-                        weekday_profile[feature] = unique_vals[0] if unique_vals else "預設"
-                        weekend_profile[feature] = unique_vals[0] if unique_vals else "預設"
+                        default_val = unique_vals[0] if unique_vals else "預設"
+                        
+                        w_vals = weekday_df[feature].dropna().unique().tolist() if not weekday_df.empty else []
+                        weekday_profile[feature] = w_vals[0] if w_vals else default_val
+                        
+                        we_vals = weekend_df[feature].dropna().unique().tolist() if not weekend_df.empty else []
+                        weekend_profile[feature] = we_vals[0] if we_vals else default_val
 
                 date_range = pd.date_range(start=start_date, end=end_date, freq="D")
                 trend_results = []
