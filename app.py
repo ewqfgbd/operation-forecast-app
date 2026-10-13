@@ -12,35 +12,61 @@ from lightgbm import LGBMRegressor
 st.set_page_config(page_title="智慧營運與機器學習預測系統", layout="wide")
 
 st.title("📈 智慧機器學習與情境預測系統")
-st.write("請依照下方明確的步驟區塊，上傳 Excel 檔案並選擇工作表進行情境模擬與政策對比預測。")
+st.write("請依照下方明確的步驟區塊，上傳資料檔案（支援 .xlsx 或 .csv）進行情境模擬與政策對比預測。")
 
-# ==================== 快取讀取函式 ====================
+# ==================== 支援 Excel 與 CSV 的快取讀取函式 ====================
 @st.cache_data
-def load_excel_data(file, sheet):
-    df = pd.read_excel(file, sheet_name=sheet)
-    pseudo_numeric_keywords = ['yyy', 'ym', '年月', '代號', '年份', '月份']
-    for col in df.columns:
-        if any(kw in str(col).lower() for kw in pseudo_numeric_keywords):
-            df[col] = df[col].astype(str)
-    return df
+def load_data_file(uploaded_file):
+    file_name = uploaded_file.name.lower()
+    if file_name.endswith('.csv'):
+        try:
+            df = pd.read_csv(uploaded_file, encoding='utf-8')
+        except UnicodeDecodeError:
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, encoding='big5')
+        return {"主資料表": df}, "主資料表", True
+    else:
+        excel_file = pd.ExcelFile(uploaded_file)
+        sheets = {sheet: excel_file.parse(sheet) for sheet in excel_file.sheet_names}
+        return sheets, excel_file.sheet_names[0], False
 
 # ==================== 步驟一：資料上傳與工作表選擇 ====================
 st.markdown("---")
 st.markdown("### 📂 步驟一：上傳資料與工作表選擇")
 
 with st.container(border=True):
-    uploaded_file = st.file_uploader("請上傳 Excel 資料檔案 (.xlsx)", type=["xlsx"])
+    uploaded_file = st.file_uploader("請上傳資料檔案 (.xlsx 或 .csv)", type=["xlsx", "csv"])
     
+    # 用來偵測檔案是否更換的機制
+    current_file_id = uploaded_file.name if uploaded_file is not None else None
+    if "last_file_id" not in st.session_state:
+        st.session_state["last_file_id"] = None
+
     if uploaded_file is not None:
-        excel_file = pd.ExcelFile(uploaded_file)
-        sheet_names = excel_file.sheet_names
+        # 如果使用者上傳了「不同的新檔案」，立刻清空舊的模型與快取狀態，避免殘留畫面
+        if st.session_state["last_file_id"] != current_file_id:
+            st.session_state["last_file_id"] = current_file_id
+            for key in ["trained_models", "model_scores", "selected_features", "target_encoding_maps", "global_mean", "train_columns", "df_original", "date_column", "target_column", "mode"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
+
+        sheets_dict, default_sheet, is_csv = load_data_file(uploaded_file)
+        sheet_names = list(sheets_dict.keys())
         
         col_s1, col_s2 = st.columns(2)
         with col_s1:
-            selected_sheet = st.selectbox("📌 請選擇要讀取的工作表 (Sheet)", sheet_names)
+            if not is_csv and len(sheet_names) > 1:
+                selected_sheet = st.selectbox("📌 請選擇要讀取的工作表 (Sheet)", sheet_names, key="sheet_selector")
+            else:
+                selected_sheet = sheet_names[0]
+                st.info("📌 目前為單一表格/CSV 檔案")
         with col_s2:
             st.markdown("<br>", unsafe_allow_html=True)
-            st.info(f"檔案內含 {len(sheet_names)} 張工作表")
+            if not is_csv:
+                st.info(f"Excel 檔案內含 {len(sheet_names)} 張工作表")
+            else:
+                st.success("✅ CSV 檔案讀取成功")
             
         st.markdown("#### 🎯 請選擇您的分析模式：")
         analysis_mode = st.radio(
@@ -52,11 +78,22 @@ with st.container(border=True):
             label_visibility="collapsed"
         )
         
-        raw_df = load_excel_data(uploaded_file, selected_sheet)
+        raw_df = sheets_dict[selected_sheet]
+        
+        pseudo_numeric_keywords = ['yyy', 'ym', '年月', '代號', '年份', '月份']
+        for col in raw_df.columns:
+            if any(kw in str(col).lower() for kw in pseudo_numeric_keywords):
+                raw_df[col] = raw_df[col].astype(str)
                 
         st.session_state["df"] = raw_df
         st.session_state["selected_sheet"] = selected_sheet
         st.session_state["analysis_mode"] = analysis_mode
+    else:
+        # 如果使用者把檔案清空，也順便重置狀態
+        st.session_state["last_file_id"] = None
+        for key in ["df", "trained_models", "model_scores", "selected_features", "target_encoding_maps", "global_mean", "train_columns", "df_original", "date_column", "target_column", "mode"]:
+            if key in st.session_state:
+                del st.session_state[key]
 
 # ==================== 步驟二：欄位對應與模型訓練 (5 大模型軍團) ====================
 if "df" in st.session_state:
